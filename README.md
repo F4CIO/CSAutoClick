@@ -12,7 +12,7 @@ CSAutoClick is a Windows application designed to automate mouse clicks based on 
 - Scale other than 100% in Display settings is NOT supported.
 
 ## Requirements
-- Newer operating system like Windows 10 or Windows 11. For older operating system try using this software but if detection is not working use my other software CSImageClick.
+- Newer operating system like Windows 10 or Windows 11. For older operating system try using this software but if detection is not working use my other software [CSImageClick](https://github.com/F4CIO/CSImageClick).
 - .NET Framework 3.5 (should already be included in Windows 7 and newer )
 - Scale of 100% in Display settings for the screen where you intend to use it. Using other scales is not tested.
 
