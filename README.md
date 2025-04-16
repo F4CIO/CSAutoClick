@@ -1,7 +1,7 @@
 # ReadMe.txt for CSAutoClick 1.0
 
 ## Overview
-CSAutoClick is a Windows application designed to automate mouse clicks based on image recognition. It continuously scans the screen for images found in same folder and performs clicks when matches are found. This tool is particularly useful for repetitive tasks that require clicking on specific UI elements.
+CSAutoClick is a Windows application designed to automate mouse clicks based on AI/computer vision image recognition. It continuously scans the screen for images found in same folder and performs clicks when matches are found. This tool is particularly useful for repetitive tasks that require clicking on specific UI elements like annoying popups.
 
 ## Features
 - Image Recognition: Automatically detects images on the screen and clicks on them.
