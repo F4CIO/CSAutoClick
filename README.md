@@ -57,9 +57,10 @@ The application logs its activities to a file named `CSAutoClick.log`. This log 
 If you are working on a source code of this app usefull to know is about Emgu.CV requirements, dependencies and limitations. Emgu CV is a .NET wrapper for the OpenCV library. 
 To run this appliation on end user machine native Emgu dll-s should be present beside .exe file. One way to get these native dll-s is to import Emgu.CV.Runtime.Windows nuget in visual studio.
 If you want to target lowest possible .net framework in order to support widest audience these versions you should target:
--.Net framework 4.6.1 (supported on Windows 7 SP1 or newer; Windows Server 2003 R2 released in 2006 support only up to .net 4.0)
--Emgu.CV 4.2.0.3636 https://www.nuget.org/packages/Emgu.CV/4.2.0.3636#supportedframeworks-body-tab
--Emgu.CV.runtime.windows 4.2.0.3636 https://www.nuget.org/packages/Emgu.CV.runtime.windows/4.2.0.3636#dependencies-body-tab
+- .Net framework 4.6.1 (supported on Windows 7 SP1 or newer; Windows Server 2003 R2 released in 2006 support only up to .net 4.0)
+- Emgu.CV 4.2.0.3636 https://www.nuget.org/packages/Emgu.CV/4.2.0.3636#supportedframeworks-body-tab
+- Emgu.CV.runtime.windows 4.2.0.3636 https://www.nuget.org/packages/Emgu.CV.runtime.windows/4.2.0.3636#dependencies-body-tab.
+  
 Native dll-s can be found if you download zip of Emgu.CV.runtime.windows nuget and search for Native or x86/x64 subfolder. 
 Many deployment tips can be found at https://www.emgu.com/wiki/index.php/Download_And_Installation#Targeting_.Net_Framework
 Windows 7 SP1 download link: https://legacyupdate.net/download-center/download/5842/windows-7-and-windows-server-2008-r2-sp1-kb976932
