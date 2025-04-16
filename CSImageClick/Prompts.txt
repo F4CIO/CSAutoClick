@@ -1,0 +1,818 @@
+﻿modify this app. add menu item Record click. when clicked check mark is added (its a check menu item) and then on next mouse click capture rectangular image around mouse coordinates (for left top calculate by reducing mouse coordinates for 10 px and for right bottom corner calculate coordinates by increasing mouse coordinates for 10px). save captured image into png file in same directory as exe file. name file so its name starts with date and time to the second precision followed by dot followed by x coordinate followed by dot followed by y coordinate of mouse when it was captured. that mouse click should be surpressed so its not reflected on actual windows and play beep sound and remove check mark from menu item.
+
+instead using emgu to detect image in whole screen area detect image in same area where it was captured using this manual approach:
+-from file name figure out click coordinates and from loaded image file figure out image size. using size and click point coordinates calculate top left coordinate on screen and bottom right coordinate on screen for screen area that we will check against. once you have rectangle area on screen calculated start comparing its pixels with pixels in loaded image. calculate total number of pixels in area. calculate 50% of that number to get how many pixels we will actually compare. then take random x and random y coordinate in area and compare pixel from screen with one from image. if not same abort process immediatelly. if same continue comparasion until you reach number of pixels that we actually want to compare. if all actualy compared pixels match perform mouse click using coordinates from file name
+
+i will give you my current app code in next prompt.
+
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows.Forms;
+using Emgu.CV;
+using Emgu.CV.CvEnum;
+using Emgu.CV.Structure;
+
+namespace CSImageClick
+{
+    class Program
+    {
+        private static NotifyIcon trayIcon;
+        private static bool isEnabled = false;
+        private static bool showDebugMarkers = false;
+        private static bool debugLogsEnabled = false; // New variable for debug logging
+        private static int checkEveryXSeconds = 5;
+        private static int precisionPercent = 70;
+        private static List<string> imageFiles = new List<string>();
+        private static bool shouldExit = false; // Flag to signal the thread to exit
+        private static Mutex mutex; // Mutex to prevent multiple instances
+
+        [DllImport("gdi32.dll")]
+        private static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
+
+        private const int LOGPIXELSX = 88; // DPI for width
+        private const int LOGPIXELSY = 90; // DPI for height
+
+        [DllImport("user32.dll")]
+        private static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
+
+        private const int MOUSEEVENTF_LEFTDOWN = 0x0002;
+        private const int MOUSEEVENTF_LEFTUP = 0x0004;
+        private const int MOUSEEVENTF_RIGHTDOWN = 0x0008;
+        private const int MOUSEEVENTF_RIGHTUP = 0x0010;
+
+        [DllImport("user32.dll")]
+        private static extern bool DestroyIcon(IntPtr hIcon);
+
+        [STAThread]
+        static void Main()
+        {
+            // Create a unique mutex name based on the executable's path
+            string mutexName = "Global\\" + Path.GetFileNameWithoutExtension(Application.ExecutablePath);
+            mutex = new Mutex(true, mutexName, out bool isNewInstance);
+
+            if(!isNewInstance)
+            {
+                LogError($"CSImageClick from path '{Application.ExecutablePath}' is already running. Aborting this instance.");
+                return; // Exit if another instance is already running
+            }
+
+            try
+            {
+                CreateConfigIfNotExists();
+                LoadConfig();
+                ScanForImages();
+
+                // Initialize the context menu first
+                trayIcon = new NotifyIcon()
+                {
+                    ContextMenu = new ContextMenu(new[]
+                    {
+                        new MenuItem("Enabled", ToggleEnabled) { Checked = isEnabled },
+                        new MenuItem("Run on startup", ToggleRunOnStartup) { Checked = false }, // Set initial state
+                        new MenuItem("Exit", Exit)
+                    }),
+                    Visible = true,
+                    Text = "CSImageClick" // Set the tooltip text
+                };
+
+                // Set the initial icon
+                trayIcon.Icon = CreateIcon(isEnabled ? Color.Green : Color.Gray);
+
+                // Check if the application is set to run on startup
+                string appName = "CSImageClick";
+                using(var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"))
+                {
+                    if(key.GetValue(appName) != null)
+                    {
+                        trayIcon.ContextMenu.MenuItems[1].Checked = true; // Check the "Run on startup" checkbox
+                    }
+                }
+
+                // Add MouseClick event handler to toggle Enabled state
+                trayIcon.MouseClick += (sender, e) =>
+                {
+                    if(e.Button == MouseButtons.Left) // Check if the left mouse button was clicked
+                    {
+                        ToggleEnabled(sender, e); // Toggle the Enabled state
+                    }
+                };
+
+                // Start the AutoClick process in a new thread
+                Thread autoClickThread = new Thread(AutoClick);
+                autoClickThread.IsBackground = true; // Set the thread as a background thread
+                autoClickThread.Start();
+
+                Application.Run();
+            }
+            catch(Exception ex)
+            {
+                LogError("An error occurred in Main: " + ex.Message);
+            }
+            finally
+            {
+                mutex.ReleaseMutex(); // Release the mutex when the application exits
+            }
+        }
+
+        private static void CreateConfigIfNotExists()
+        {
+            string filePath = "CSImageClick.ini";
+            if(!File.Exists(filePath))
+            {
+                using(var writer = new StreamWriter(filePath))
+                {
+                    writer.WriteLine("Enabled=false");
+                    writer.WriteLine("CheckEveryXSeconds=5");
+                    writer.WriteLine("PrecisionPercent=70");
+                    writer.WriteLine("AllowedDisplacementInPixels=1");
+                    writer.WriteLine("ShowDebugMarkers=false");
+                    writer.WriteLine("DebugLogsEnabled=false"); // Add this line
+                }
+            }
+        }
+
+        private static void LoadConfig()
+        {
+            try
+            {
+                var config = ParseIniFile("CSImageClick.ini");
+
+                if(config.ContainsKey("Enabled"))
+                    isEnabled = bool.Parse(config["Enabled"]);
+                if(config.ContainsKey("CheckEveryXSeconds"))
+                    checkEveryXSeconds = int.Parse(config["CheckEveryXSeconds"]);
+                if(config.ContainsKey("PrecisionPercent"))  precisionPercent = int.Parse(config["PrecisionPercent"]);
+                if(config.ContainsKey("AllowedDisplacementInPixels"))  allowedDisplacementInPixels = int.Parse(config["AllowedDisplacementInPixels"]);
+                if(config.ContainsKey("ShowDebugMarkers"))
+                    showDebugMarkers = bool.Parse(config["ShowDebugMarkers"]);
+                if(config.ContainsKey("DebugLogsEnabled")) // Load the debug logs setting
+                    debugLogsEnabled = bool.Parse(config["DebugLogsEnabled"]);
+
+                Log("Configuration loaded successfully.");
+            }
+            catch(Exception ex)
+            {
+                LogError("Failed to load configuration: " + ex.Message);
+            }
+        }
+
+        private static Dictionary<string, string> ParseIniFile(string filePath)
+        {
+            var config = new Dictionary<string, string>();
+
+            if(!File.Exists(filePath))
+                return config;
+
+            string[] lines = File.ReadAllLines(filePath);
+            foreach(var line in lines)
+            {
+                if(line == null || line.Trim().Length == 0 || line.StartsWith(";")) continue;
+
+                var parts = line.Split(new[] { '=' }, 2);
+                if(parts.Length == 2)
+                {
+                    string key = parts[0].Trim();
+                    string value = parts[1].Trim();
+                    config[key] = value;
+                }
+            }
+
+            return config;
+        }
+
+        private static void ScanForImages()
+        {
+            try
+            {
+                string[] files = Directory.GetFiles(Directory.GetCurrentDirectory(), "*.png");
+                imageFiles.AddRange(files);
+                Log($"Found {imageFiles.Count} image(s) for clicking.");
+            }
+            catch(Exception ex)
+            {
+                LogError("Error scanning for images: " + ex.Message);
+            }
+        }
+
+        private static void ToggleEnabled(object sender, EventArgs e)
+        {
+            isEnabled = !isEnabled;
+            trayIcon.ContextMenu.MenuItems[0].Checked = isEnabled;
+            UpdateConfig("Enabled", isEnabled.ToString());
+
+            // Update the tray icon based on the new state
+            trayIcon.Icon = CreateIcon(isEnabled ? Color.Green : Color.Gray);
+            Log($"AutoClick is now {(isEnabled ? "enabled" : "disabled")}.");
+        }
+
+        private static void ToggleRunOnStartup(object sender, EventArgs e)
+        {
+            string appName = "CSImageClick";
+            string appPath = Application.ExecutablePath;
+
+            using(var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
+            {
+                if(key.GetValue(appName) == null)
+                {
+                    key.SetValue(appName, appPath);
+                    trayIcon.ContextMenu.MenuItems[1].Checked = true; // Check the "Run on startup" checkbox
+                    Log("Set to run on startup.");
+                }
+                else
+                {
+                    key.DeleteValue(appName);
+                    trayIcon.ContextMenu.MenuItems[1].Checked = false; // Uncheck the "Run on startup" checkbox
+                    Log("Removed from startup.");
+                }
+            }
+        }
+
+        private static void Exit(object sender, EventArgs e)
+        {
+            shouldExit = true; // Signal the thread to exit
+            trayIcon.Visible = false; // Hide the tray icon
+            Log("Exiting application.");
+
+            Application.Exit(); // Exit the application
+        }
+
+        private static void AutoClick()
+        {
+            while(!shouldExit)
+            {
+                if(isEnabled)
+                {
+                    foreach(var imagePath in imageFiles)
+                    {
+                        try
+                        {
+                            using(var template = new Image<Bgr, byte>(imagePath))
+                            {
+                                DetectAndClick(template, imagePath); // Call the synchronous version
+                            }
+                        }
+                        catch(Exception ex)
+                        {
+                            LogError($"Error processing image {imagePath}: {ex.Message}");
+                        }
+                    }
+                }
+                Thread.Sleep(checkEveryXSeconds * 1000); // Synchronously wait
+            }
+        }
+
+        private static void DetectAndClick(Image<Bgr, byte> template, string imagePath)
+        {
+            foreach(var screen in Screen.AllScreens)
+            {
+                try
+                {
+                    using(var screenCapture = CaptureScreen(screen.Bounds)) // Synchronous capture
+                    using(var screenImage = new Image<Bgr, byte>(screenCapture))
+                    using(var result = new Mat())
+                    {
+                        CvInvoke.MatchTemplate(screenImage, template, result, TemplateMatchingType.CcoeffNormed);
+
+                        double minValue = 0, maxValue = 0;
+                        Point minLocation = new Point(), maxLocation = new Point();
+                        CvInvoke.MinMaxLoc(result, ref minValue, ref maxValue, ref minLocation, ref maxLocation);
+
+                        if(maxValue * 100 >= precisionPercent)
+                        {
+                            Point matchLocation = maxLocation;
+                            int clickX = matchLocation.X + (template.Width / 2) + screen.Bounds.X;
+                            int clickY = matchLocation.Y + (template.Height / 2) + screen.Bounds.Y;
+
+                            bool isRightClick = imagePath.IndexOf("RightClick", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                            ClickAt(clickX, clickY, isRightClick);
+
+                            if(debugLogsEnabled)
+                            {
+                                Log($"DEBUG: Clicked at ({clickX}, {clickY}) for image {Path.GetFileName(imagePath)}.");
+                                Log($"DEBUG: Detected image '{Path.GetFileName(imagePath)}' at ({clickX}, {clickY}) with confidence {maxValue * 100:F2}%.");
+                            }
+                        }
+                    }
+                }
+                catch(Exception ex)
+                {
+                    LogError($"Error detecting and clicking on screen {screen.DeviceName}: {ex.Message}");
+                }
+            }
+        }
+
+        private static Bitmap CaptureScreen(Rectangle bounds)
+        {
+            Bitmap screenCapture = new Bitmap(bounds.Width, bounds.Height);
+            using(Graphics g = Graphics.FromImage(screenCapture))
+            {
+                g.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
+            }
+            return screenCapture; // Ensure to dispose of this Bitmap in the calling method
+        }
+
+        private static void ClickAt(int x, int y, bool rightClick = false)
+        {
+            Cursor.Position = new Point(x, y);
+            if(rightClick)
+            {
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+            }
+            else
+            {
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            }
+
+            if(debugLogsEnabled)
+            {
+                Log($"DEBUG: Mouse {(rightClick ? "right" : "left")} clicked at ({x}, {y}).");
+            }
+        }
+
+        private static Icon CreateIcon(Color color)
+        {
+            int width = 16; // Icon width
+            int height = 16; // Icon height
+            Bitmap bitmap = new Bitmap(width, height);
+
+            using(Graphics g = Graphics.FromImage(bitmap))
+            {
+                g.Clear(Color.Transparent); // Set background to transparent
+                using(Brush brush = new SolidBrush(color))
+                {
+                    // Draw the letter "A"
+                    Font font = new Font("Arial", 12, FontStyle.Bold);
+                    g.DrawString("A", font, brush, new PointF(0, 0));
+                }
+
+                using(Pen pen = new Pen(color))
+                {
+                    g.DrawEllipse(pen, new Rectangle(1, 1, width - 2, height - 2));
+                }
+            }
+
+            // Create the icon from the bitmap
+            Icon icon = Icon.FromHandle(bitmap.GetHicon());
+            // Dispose of the bitmap to prevent memory leak
+            bitmap.Dispose();
+
+            // Return the icon, but ensure to release the handle when done
+            return icon;
+        }
+
+        private static void UpdateConfig(string key, string value)
+        {
+            var config = ParseIniFile("CSImageClick.ini");
+            config[key] = value;
+
+            using(var writer = new StreamWriter("CSImageClick.ini"))
+            {
+                foreach(var entry in config)
+                {
+                    writer.WriteLine($"{entry.Key}={entry.Value}");
+                }
+            }
+            Log($"Updated config: {key} = {value}");
+        }
+
+        private static void Log(string message)
+        {
+            try
+            {
+                using(var writer = new StreamWriter("CSImageClick.log", true))
+                {
+                    writer.WriteLine($"{DateTime.Now}: {message}");
+                }
+            }
+            catch(Exception ex)
+            {
+                // If logging fails, we can choose to ignore it or handle it differently
+                Console.WriteLine("Logging failed: " + ex.Message);
+            }
+        }
+
+        private static void LogError(string message)
+        {
+            Log("ERROR: " + message);
+        }
+    }
+}
+
+
+
+
+========================================================================================
+fix and finish this code using instruction from comments. here is first part of my code. i will give second part in next prompt. wait for second part.
+
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows.Forms;
+
+namespace CSImageClick
+{
+    class Program
+    {
+        private static NotifyIcon trayIcon;
+        private static bool isEnabled = false;
+        private static bool showDebugMarkers = false;
+        private static bool debugLogsEnabled = false; // New variable for debug logging
+        private static int checkEveryXSeconds = 5;
+        private static int precisionPercent = 70;
+        private static List<string> imageFiles = new List<string>();
+        private static bool shouldExit = false; // Flag to signal the thread to exit
+        private static Mutex mutex; // Mutex to prevent multiple instances
+
+        [DllImport("gdi32.dll")]
+        private static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
+
+        private const int LOGPIXELSX = 88; // DPI for width
+        private const int LOGPIXELSY = 90; // DPI for height
+
+        [DllImport("user32.dll")]
+        private static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
+
+        private const int MOUSEEVENTF_LEFTDOWN = 0x0002;
+        private const int MOUSEEVENTF_LEFTUP = 0x0004;
+        private const int MOUSEEVENTF_RIGHTDOWN = 0x0008;
+        private const int MOUSEEVENTF_RIGHTUP = 0x0010;
+
+        [DllImport("user32.dll")]
+        private static extern bool DestroyIcon(IntPtr hIcon);
+
+        [STAThread]
+        static void Main()
+        {
+            // Create a unique mutex name based on the executable's path
+            string mutexName = "Global\\" + Path.GetFileNameWithoutExtension(Application.ExecutablePath);
+            mutex = new Mutex(true, mutexName, out bool isNewInstance);
+
+            if(!isNewInstance)
+            {
+                LogError($"CSAutoClick from path '{Application.ExecutablePath}' is already running. Aborting this instance.");
+                return; // Exit if another instance is already running
+            }
+
+            try
+            {
+                CreateConfigIfNotExists();
+                LoadConfig();
+                ScanForImages();
+
+                // Initialize the context menu first
+                trayIcon = new NotifyIcon()
+                {
+                    ContextMenu = new ContextMenu(new[]
+                    {
+                        new MenuItem("Enabled", ToggleEnabled) { Checked = isEnabled },
+                        new MenuItem("Run on startup", ToggleRunOnStartup) { Checked = false }, // Set initial state
+                        new MenuItem("Exit", Exit)
+                    }),
+                    Visible = true,
+                    Text = "CSAutoClick" // Set the tooltip text
+                };
+
+                // Set the initial icon
+                trayIcon.Icon = CreateIcon(isEnabled ? Color.Green : Color.Gray);
+
+                // Check if the application is set to run on startup
+                string appName = "CSAutoClick";
+                using(var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"))
+                {
+                    if(key.GetValue(appName) != null)
+                    {
+                        trayIcon.ContextMenu.MenuItems[1].Checked = true; // Check the "Run on startup" checkbox
+                    }
+                }
+
+                // Add MouseClick event handler to toggle Enabled state
+                trayIcon.MouseClick += (sender, e) =>
+                {
+                    if(e.Button == MouseButtons.Left) // Check if the left mouse button was clicked
+                    {
+                        ToggleEnabled(sender, e); // Toggle the Enabled state
+                    }
+                };
+
+                // Start the AutoClick process in a new thread
+                Thread autoClickThread = new Thread(AutoClick);
+                autoClickThread.IsBackground = true; // Set the thread as a background thread
+                autoClickThread.Start();
+
+                Application.Run();
+            }
+            catch(Exception ex)
+            {
+                LogError("An error occurred in Main: " + ex.Message);
+            }
+            finally
+            {
+                mutex.ReleaseMutex(); // Release the mutex when the application exits
+            }
+        }
+
+        private static void CreateConfigIfNotExists()
+        {
+            string filePath = "CSAutoClick.ini";
+            if(!File.Exists(filePath))
+            {
+                using(var writer = new StreamWriter(filePath))
+                {
+                    writer.WriteLine("Enabled=false");
+                    writer.WriteLine("CheckEveryXSeconds=5");
+                    writer.WriteLine("PrecisionPercent=70");
+                    writer.WriteLine("AllowedDisplacementInPixels=1");
+                    writer.WriteLine("ShowDebugMarkers=false");
+                    writer.WriteLine("DebugLogsEnabled=false"); // Add this line
+                }
+            }
+        }
+
+        private static void LoadConfig()
+        {
+            try
+            {
+                var config = ParseIniFile("CSAutoClick.ini");
+
+                if(config.ContainsKey("Enabled"))
+                    isEnabled = bool.Parse(config["Enabled"]);
+                if(config.ContainsKey("CheckEveryXSeconds"))
+                    checkEveryXSeconds = int.Parse(config["CheckEveryXSeconds"]);
+                if(config.ContainsKey("PrecisionPercent"))  precisionPercent = int.Parse(config["PrecisionPercent"]);
+                if(config.ContainsKey("AllowedDisplacementInPixels"))  allowedDisplacementInPixels = int.Parse(config["AllowedDisplacementInPixels"]);
+                if(config.ContainsKey("ShowDebugMarkers"))
+                    showDebugMarkers = bool.Parse(config["ShowDebugMarkers"]);
+                if(config.ContainsKey("DebugLogsEnabled")) // Load the debug logs setting
+                    debugLogsEnabled = bool.Parse(config["DebugLogsEnabled"]);
+
+                Log("Configuration loaded successfully.");
+            }
+            catch(Exception ex)
+            {
+                LogError("Failed to load configuration: " + ex.Message);
+            }
+        }
+
+        private static Dictionary<string, string> ParseIniFile(string filePath)
+        {
+            var config = new Dictionary<string, string>();
+
+            if(!File.Exists(filePath))
+                return config;
+
+            string[] lines = File.ReadAllLines(filePath);
+            foreach(var line in lines)
+            {
+                if(line == null || line.Trim().Length == 0 || line.StartsWith(";")) continue;
+
+                var parts = line.Split(new[] { '=' }, 2);
+                if(parts.Length == 2)
+                {
+                    string key = parts[0].Trim();
+                    string value = parts[1].Trim();
+                    config[key] = value;
+                }
+            }
+
+            return config;
+        }
+
+        private static void ScanForImages()
+        {
+            try
+            {
+                string[] files = Directory.GetFiles(Directory.GetCurrentDirectory(), "*.png");
+                imageFiles.AddRange(files);
+                Log($"Found {imageFiles.Count} image(s) for clicking.");
+            }
+            catch(Exception ex)
+            {
+                LogError("Error scanning for images: " + ex.Message);
+            }
+        }
+
+        private static void ToggleEnabled(object sender, EventArgs e)
+        {
+            isEnabled = !isEnabled;
+            trayIcon.ContextMenu.MenuItems[0].Checked = isEnabled;
+            UpdateConfig("Enabled", isEnabled.ToString());
+
+            // Update the tray icon based on the new state
+            trayIcon.Icon = CreateIcon(isEnabled ? Color.Green : Color.Gray);
+            Log($"AutoClick is now {(isEnabled ? "enabled" : "disabled")}.");
+        }
+
+        private static void ToggleRunOnStartup(object sender, EventArgs e)
+        {
+            string appName = "CSAutoClick";
+            string appPath = Application.ExecutablePath;
+
+            using(var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true))
+            {
+                if(key.GetValue(appName) == null)
+                {
+                    key.SetValue(appName, appPath);
+                    trayIcon.ContextMenu.MenuItems[1].Checked = true; // Check the "Run on startup" checkbox
+                    Log("Set to run on startup.");
+                }
+                else
+                {
+                    key.DeleteValue(appName);
+                    trayIcon.ContextMenu.MenuItems[1].Checked = false; // Uncheck the "Run on startup" checkbox
+                    Log("Removed from startup.");
+                }
+            }
+        }
+
+        private static void Exit(object sender, EventArgs e)
+        {
+            shouldExit = true; // Signal the thread to exit
+            trayIcon.Visible = false; // Hide the tray icon
+            Log("Exiting application.");
+
+            Application.Exit(); // Exit the application
+        }
+
+        private static void AutoClick()
+        {
+            while(!shouldExit)
+            {
+                if(isEnabled)
+                {
+                    foreach(var imagePath in imageFiles)
+                    {
+                        try
+                        {
+                            using(var template = new Image(imagePath))//fix error here: Cannot create an instance of the abstract type or interface 'Image'
+                            {
+                                DetectAndClick(template, imagePath); // Call the synchronous version
+                            }
+                        }
+                        catch(Exception ex)
+                        {
+                            LogError($"Error processing image {imagePath}: {ex.Message}");
+                        }
+                    }
+                }
+                Thread.Sleep(checkEveryXSeconds * 1000); // Synchronously wait
+            }
+        }
+
+        private static void DetectAndClick(Image template, string imagePath)
+        {
+            foreach(var screen in Screen.AllScreens)
+            {
+                try
+                {
+                    using(var screenCapture = CaptureScreen(screen.Bounds)) // Synchronous capture
+                    using(var screenImage = new Image(screenCapture))//fix error here: Cannot create an instance of the abstract type or interface 'Image'
+                    {
+                        bool matched = false;
+                        Rectangle hotArea = new Rectangle();
+                        hotArea.X = 0; //extract value to assign from imagePath file name part where filename part is in format <randomtext>.X<value>.Y<value>.<randomtext>. Values in imagePath are relative to screen bounds top left corner.
+                        hotArea.Y = 0; //extract value to assign from imagePath file name part where filename part is in format <randomtext>.X<value>.Y<value>.<randomtext>. Values in imagePath are relative to screen bounds top left corner.
+                        //if hotArea.X or hotArea.Y is larger than screen size go to next screen
+                        hotArea.X = hotArea.X+screen.Bounds.X; 
+                        hotArea.Y = hotArea.Y+screen.Bounds.Y;
+                        hotArea.Width = template.Width;
+                        hotArea.Height = template.Height;
+                        
+                        //here add code for point-by-point comparasion of template and hotarea from screenImage
+                        //for each point: take random coordinates and use them to take point from template and hotarea and from screenImage. keep track of coordinates already used in order not to repeat comparation.
+                        //do not process all points but only percent of their total number. that percent is given by precisionPercent. on first missmatch exit comparasion to save resources
+
+                        if(matched)
+                        {
+                            int clickX = hotArea.X + (template.Width / 2) + screen.Bounds.X;
+                            int clickY = hotArea.Y + (template.Height / 2) + screen.Bounds.Y;
+
+                            bool isRightClick = imagePath.IndexOf("RightClick", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                            ClickAt(clickX, clickY, isRightClick);
+
+                            if(debugLogsEnabled)
+                            {
+                                //add beep here which should be in another thread
+                                Log($"DEBUG: Clicked at ({clickX}, {clickY}) for image {Path.GetFileName(imagePath)}.");
+                                Log($"DEBUG: Detected image '{Path.GetFileName(imagePath)}' at ({clickX}, {clickY}) with confidence {maxValue * 100:F2}%.");
+                            }
+                        }
+                    }
+                }
+                catch(Exception ex)
+                {
+                    LogError($"Error detecting and clicking on screen {screen.DeviceName}: {ex.Message}");
+                }
+            }
+        }
+
+        private static Bitmap CaptureScreen(Rectangle bounds)
+        {
+            Bitmap screenCapture = new Bitmap(bounds.Width, bounds.Height);
+            using(Graphics g = Graphics.FromImage(screenCapture))
+            {
+                g.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
+            }
+            return screenCapture; // Ensure to dispose of this Bitmap in the calling method
+        }
+
+        private static void ClickAt(int x, int y, bool rightClick = false)
+        {
+            Cursor.Position = new Point(x, y);
+            if(rightClick)
+            {
+                mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+            }
+            else
+            {
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            }
+
+            if(debugLogsEnabled)
+            {
+                Log($"DEBUG: Mouse {(rightClick ? "right" : "left")} clicked at ({x}, {y}).");
+            }
+        }
+
+        private static Icon CreateIcon(Color color)
+        {
+            int width = 16; // Icon width
+            int height = 16; // Icon height
+            Bitmap bitmap = new Bitmap(width, height);
+
+            using(Graphics g = Graphics.FromImage(bitmap))
+            {
+                g.Clear(Color.Transparent); // Set background to transparent
+                using(Brush brush = new SolidBrush(color))
+                {
+                    // Draw the letter "A"
+                    Font font = new Font("Arial", 12, FontStyle.Bold);
+                    g.DrawString("A", font, brush, new PointF(0, 0));
+                }
+
+                using(Pen pen = new Pen(color))
+                {
+                    g.DrawEllipse(pen, new Rectangle(1, 1, width - 2, height - 2));
+                }
+            }
+
+            // Create the icon from the bitmap
+            Icon icon = Icon.FromHandle(bitmap.GetHicon());
+            // Dispose of the bitmap to prevent memory leak
+            bitmap.Dispose();
+
+            // Return the icon, but ensure to release the handle when done
+            return icon;
+        }
+
+        private static void UpdateConfig(string key, string value)
+        {
+            var config = ParseIniFile("CSAutoClick.ini");
+            config[key] = value;
+
+            using(var writer = new StreamWriter("CSAutoClick.ini"))
+            {
+                foreach(var entry in config)
+                {
+                    writer.WriteLine($"{entry.Key}={entry.Value}");
+                }
+            }
+            Log($"Updated config: {key} = {value}");
+        }
+
+        private static void Log(string message)
+        {
+            try
+            {
+                using(var writer = new StreamWriter("CSAutoClick.log", true))
+                {
+                    writer.WriteLine($"{DateTime.Now}: {message}");
+                }
+            }
+            catch(Exception ex)
+            {
+                // If logging fails, we can choose to ignore it or handle it differently
+                Console.WriteLine("Logging failed: " + ex.Message);
+            }
+        }
+
+        private static void LogError(string message)
+        {
+            Log("ERROR: " + message);
+        }
+    }
+}
+
+
