@@ -1,7 +1,7 @@
 # ReadMe.txt for CSImageClick 1.0
 
 ## Overview
-CSAutoClick is a Windows application designed to automate mouse clicks based on image recognition. It continuously scans the screen for .png images found in same folder and performs clicks when matches are found. This tool is particularly useful for repetitive tasks that require clicking on specific UI elements.
+CSAutoClick is a Windows application designed to automate mouse clicks based on image recognition. It continuously scans the screen for images found in same folder and performs clicks when matches are found. This tool is particularly useful for repetitive tasks that require clicking on specific UI elements.
 
 ## Features
 - Image Recognition: Automatically detects images on the screen and clicks on them.
@@ -34,11 +34,11 @@ The application uses a configuration file named `CSAutoClick.ini`. This file is 
 - `DebugLogsEnabled`: Set to `true` to enable logging of debug information.
 
 ### Example `CSAutoClick.ini` Configuration
-Enabled=false
+<code>Enabled=false
 CheckEveryXSeconds=5
 PrecisionPercent=70
 ShowDebugMarkers=false
-DebugLogsEnabled=false
+DebugLogsEnabled=false'</code>
 
 ## Image Files
 Place the images you want to detect in the same directory as the application. The application currently supports .png .jpg .bmp and .gif files. You can put 'RightClick' in file name of images to indicate whether a right-click should be performed (e.g., `MyButton1.RightClick.png`). Click location is by default in center of image. To set click to different location you can put put some pixel number beween .OX and . like for example myAnnoyingButton.OX-10.OY550.rightClick.png
